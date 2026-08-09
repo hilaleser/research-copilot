@@ -9,9 +9,10 @@ read.
 
 ## Links
 
-- **Repository:** *(add your GitHub URL)*
-- **MCP server app:** *(add your app URL)*
-- **Agent app:** *(add your exported agent app URL)*
+- **Repository:** *(https://github.com/hilaleser/research-copilot)*
+- **MCP server app:** *(https://mcp-research-copilot-7474658847984131.aws.databricksapps.com)*
+- **Agent app:** *(https://agent-research-copilot-7474658847984131.aws.databricksapps.com)*
+
 
 ---
 
