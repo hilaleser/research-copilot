@@ -1,0 +1,17 @@
+# Databricks App configuration for the Research Copilot MCP server.
+#
+# The script must listen on port 8000 and bind to 0.0.0.0 - see the bottom of
+# research_mcp_server.py.
+command: ["python", "research_mcp_server.py"]
+
+# Secrets are attached in the UI under Settings > Resources > Add resource >
+# Secret, which exposes them to the process as environment variables.
+#
+#   lakebase_url      REQUIRED - the Lakebase Postgres connection string
+#   openalex_api_key  OPTIONAL - only if OpenAlex requires a key for you
+#
+# Nothing is hardcoded here. If you do not need an OpenAlex key, delete that
+# entry rather than leaving it pointing at a resource that does not exist.
+env:
+  - name: lakebase_url
+    valueFrom: lakebase_url
