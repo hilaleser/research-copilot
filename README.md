@@ -9,8 +9,8 @@ read.
 
 ## Links
 
-- **Repository:** *((https://github.com/hilaleser/research-copilot))*
-- **MCP server app:** *((https://mcp-research-copilot-7474658847984131.aws.databricksapps.com))*
+- **Repository:** *(https://github.com/hilaleser/research-copilot)*
+- **MCP server app:** *(https://mcp-research-copilot-7474658847984131.aws.databricksapps.com)*
 - **Agent app:** *(https://agent-research-copilot-7474658847984131.aws.databricksapps.com)*
 
 ## Architecture
