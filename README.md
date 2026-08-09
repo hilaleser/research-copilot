@@ -9,33 +9,220 @@ read.
 
 ## Links
 
-- **Repository:** *(https://github.com/hilaleser/research-copilot)*
-- **MCP server app:** *(https://mcp-research-copilot-7474658847984131.aws.databricksapps.com)*
-- **Agent app:** *(https://agent-research-copilot-7474658847984131.aws.databricksapps.com)*
+- **Repository:** *(add your GitHub URL)*
+- **MCP server app:** *(add your app URL)*
+- **Agent app:** *(add your exported agent app URL)*
+
+---
+
+## In plain terms
+
+Say you want to learn about attachment theory. You tell the copilot, and it:
+
+1. **Finds papers.** It searches OpenAlex, a free catalogue of about 250 million
+   academic papers.
+2. **Saves the ones you pick** into your reading collection.
+3. **Answers questions from those papers**, and tells you which paper each answer
+   came from.
+4. **Builds a reading order** — what to read first, what to read after, and why.
+5. **Tracks what you have read** and tells you what is next.
+
+### The part that makes step 3 work
+
+An academic paper is long. You cannot paste fifty of them into a chatbot — it
+would cost a fortune and the model would lose the thread.
+
+So instead, every abstract is turned into a list of numbers called an
+**embedding**. Similar meanings end up with similar numbers. When you ask a
+question, the question becomes numbers too, and the system finds the closest
+matches.
+
+The useful part: this matches on **meaning, not words**. Ask about *"how a child
+learns to feel safe"* and it will find a paper that only ever says *"secure
+base"* — no shared words at all.
+
+Only those few matching passages go to the model. Fifty papers cost the same as
+five.
+
+### Why there are two databases
+
+This confused me at first, so plainly:
+
+**Lakebase (Postgres)** is for *right now*. What is in my collection? Have I
+read this one? It answers in milliseconds, which is what the app needs. But it
+only stores the current state. Mark a paper as read and the fact that it was
+unread yesterday is simply gone.
+
+**Delta** is for *history*. Every change is kept forever. That is what lets you
+ask "how many papers did I finish this week" — a question Lakebase cannot answer
+at all, because it does not remember.
+
+Same data, two copies, two different jobs.
+
+### Why the reading plan is not just a list
+
+Sorting papers by date or by popularity is easy and not very useful. This one
+sorts them by **what you need to understand first**:
+
+- **Stage 1 — Foundations.** The heavily cited papers, oldest first. These are
+  the ones that invented the vocabulary everyone else uses. Read a 2024 paper
+  before these and the words will not mean anything to you.
+- **Stage 2 — Current work.** Everything else, newest first. These assume you
+  have already done Stage 1.
+
+Papers you have finished drop out of the plan, so it moves forward as you do.
+
+---
+
+## Proof it works
+
+Screenshots from actual runs, not mock-ups.
+
+### The agent
+
+| Screenshot | What it shows |
+|---|---|
+| *(agent_find_papers.png)* | Asking for papers on attachment theory. The agent calls `set_learning_goal`, then `find_papers`, and stores 8 papers. |
+| *(agent_search_evidence.png)* | A research question answered from the saved papers, with a citation for every claim. |
+| *(agent_reading_plan.png)* | The study plan, in two stages, with the reason for the ordering. |
+| *(agent_next_paper.png)* | After marking one paper read, the plan advances and suggests the next one. |
+
+### The Spark pipeline (`notebooks/01_spark_medallion_pipeline.py`)
+
+| Screenshot | What it shows |
+|---|---|
+| *(spark_summary.png)* | Row counts across all four Delta tables: 50 raw papers in, 50 parsed, **210 author rows**, 115 embedded chunks. |
+| *(spark_schemas.png)* | The schema of every Delta table in one query. Each medallion layer has a genuinely different shape. |
+
+**On the 210:** 50 papers produced 210 author rows because `explode` turns one
+paper with five authors into five rows. That is the whole point — now you can
+ask "which authors come up most in my collection", which is a simple `GROUP BY`
+here and impossible against the JSON blob stored in Postgres.
+
+### Change Data Feed (`notebooks/02_cdf_analytics.py`)
+
+| Screenshot | What it shows |
+|---|---|
+| *(cdf_enabled.png)* | `delta.enableChangeDataFeed = true` confirmed on both mirrored tables. |
+| *(cdf_inserts.png)* | The change feed after the first sync: four `insert` rows, one per saved paper. |
+| *(cdf_update_pair.png)* | **One paper marked read produces two rows** — `update_preimage` (`to_read`) and `update_postimage` (`read`), same commit version. |
+| *(cdf_analytics.png)* | The daily analytics table: `papers_saved: 4`, `papers_finished: 1`. |
+
+**These four screenshots are one chain, not four separate things.** The 4 inserts
+in the second screenshot become `papers_saved: 4` in the fourth. The single
+update in the third becomes `papers_finished: 1`. The numbers line up because
+the pipeline actually runs end to end.
+
+**The third screenshot is the important one.** One change, two rows: the value
+before, and the value after. Postgres cannot show you that — it overwrote the
+old value and moved on. This is the difference the boot camp's Day 1 was about,
+visible in a single table.
 
 ## Architecture
 
+Two halves, deliberately separated: an **operational** path that serves the
+agent in real time, and an **analytical** path built on Spark and Delta.
+
 ```
-   student
-      |
-      v
-  Agent Bricks agent  (AI Playground, Llama 3.3 70B)
-      |
-      |  MCP over HTTP
-      v
-  research_mcp_server.py        <-- Databricks App, FastMCP, port 8000
-      |    thin @mcp.tool functions - no HTTP, no SQL here
-      |
-      +--> openalex_broker.py   <-- every HTTP call, all JSON parsing
-      |         |
-      |         +--> OpenAlex API
-      |
-      +--> db.py                <-- every SQL statement
-      |         |
-      |         +--> Lakebase / Postgres + pgvector
-      |
-      +--> embeddings.py        <-- all-MiniLM-L6-v2, 384 dimensions
+                          OPERATIONAL                    ANALYTICAL
+                     (low latency, current state)   (history, aggregates)
+
+   student                                          notebooks/01_spark_medallion_pipeline.py
+      |                                                         |
+      v                                                    OpenAlex API
+  Agent Bricks agent                                            |
+      |  MCP over HTTP                                          v
+      v                                              oa_papers_bronze     (Delta, raw JSON)
+  research_mcp_server.py   <- Databricks App                    |
+      |   thin @mcp.tool functions                              v
+      |                                              oa_papers_silver     (Delta, parsed)
+      +--> openalex_broker.py  <- all HTTP           oa_paper_authors_silver (Delta, exploded)
+      |         |                                                |
+      |         +--> OpenAlex API                                v
+      |                                              oa_paper_embeddings_gold (Delta, mapInPandas)
+      +--> db.py               <- all SQL
+      |         |                                    notebooks/02_cdf_analytics.py
+      |         +--> Lakebase / Postgres + pgvector             |
+      |                    |                                    v
+      +--> embeddings.py    +------ CDF mirror -->  activity_* tables (Delta, CDF enabled)
+           MiniLM, 384-dim                                       |
+                                                                 v
+                                                    activity_analytics_gold (daily progress)
 ```
+
+Lakebase answers *"what does this student have saved right now"* — single-row
+lookups, sub-second, feeding a live app. Delta answers *"which authors dominate
+this field, how has the collection grown, what changed this week"*. Those are
+different questions and they want different stores; that split is the whole
+point of the database-versus-lake distinction.
+
+## Spark pipeline (`notebooks/01_spark_medallion_pipeline.py`)
+
+Medallion architecture over Delta:
+
+| Layer | Table | Contents |
+|---|---|---|
+| Bronze | `oa_papers_bronze` | Raw OpenAlex JSON, untouched |
+| Silver | `oa_papers_silver` | Parsed papers, abstracts reconstructed |
+| Silver | `oa_paper_authors_silver` | Authors **exploded**, one row per author per paper |
+| Gold | `oa_paper_embeddings_gold` | Chunk embeddings via `mapInPandas` |
+
+**Bronze exists so silver can be rebuilt.** Keeping the payload untouched means
+a parsing bug costs you a re-run of silver, not a re-fetch from the API.
+
+**Authors are exploded here and kept as JSONB in Postgres — on purpose.** The
+MCP server only ever reads authors whole, to compose a citation string; a blob
+is the right shape for that. Analytics wants the opposite: *"which authors
+appear most across my collection"* is a `GROUP BY author_name`, impossible
+against a blob and trivial against one row per author. Same data, two shapes,
+two access patterns. The notebook demonstrates the query that only works on the
+exploded form.
+
+**Embeddings are computed with `mapInPandas`**, which loads the model once per
+partition rather than once per row and embeds partitions in parallel. Two
+things that bite, both learned the hard way: HuggingFace's cache directory is
+read-only on serverless and must be pointed at `/tmp` *inside the worker
+function* as well as on the driver, because executors are separate processes;
+and `ai_query()` is avoided entirely because Free Edition throttles it hard
+enough that 92 records time out.
+
+Every write is a `MERGE`, so re-running refreshes citation counts instead of
+duplicating rows.
+
+## Change Data Feed (`notebooks/02_cdf_analytics.py`)
+
+Lakebase records the present. Update a paper to `read` and the fact that it was
+ever `to_read` is gone — but that history is exactly what learning analytics
+needs.
+
+So the operational tables are mirrored into Delta with
+`delta.enableChangeDataFeed = true`, and the change feed drives an analytics
+table:
+
+| Table | Contents |
+|---|---|
+| `activity_collection_papers` | Delta mirror of Lakebase, CDF enabled |
+| `activity_learning_goals` | Delta mirror, CDF enabled |
+| `activity_changes_raw` | Every row change, persisted beyond Delta's retention |
+| `activity_analytics_gold` | Daily papers saved / started / finished per student |
+
+**Why CDF rather than diffing daily snapshots?** A snapshot only shows where a
+row ended up. If a paper moved `to_read → reading → read` in one day, snapshots
+see one change and the feed sees three, with timestamps.
+
+Two details worth stating because they are easy to get wrong:
+
+- **CDF is a Delta Lake table property, not a Databricks-only feature**, and not
+  the same thing as Lakebase's Postgres→Delta sync.
+- **An update emits two rows** — `update_preimage` and `update_postimage`.
+  Counting updates without filtering to the postimage double-counts every one.
+  The analytics query filters accordingly.
+
+Reads from Lakebase use `psycopg2` on the driver rather than Spark JDBC:
+serverless cannot write to external Postgres over JDBC, and even for reads, a
+distributed job opening one connection per worker can exhaust a production
+database's pool. The tables are small; the driver reads them once and Spark
+does the work Spark is for.
 
 The layering is deliberate. Tool functions validate input, call one of the
 three modules, standardize the result, and return. That keeps each tool around
